@@ -211,15 +211,41 @@ class TestSvdqQuantizeW4A4ActFuseLoraFallback:
 class TestAwqGemvW4A16Fallback:
     """Tests for the fallback AWQ GEMV."""
 
-    def test_raises_not_implemented(self):
+    @staticmethod
+    def _pack_awq_weight(weight_uint4, n, k):
+        """Pack a (n, k) uint4 weight into TinyChat AWQ int32 format for testing.
+
+        Reproduces the pack_w4 logic from tinychat_utils.
+        """
+        w = weight_uint4.to(torch.int32)
+        w = w.view(-1, 4, 8)
+        packed_i16 = w[:, 0] | (w[:, 1] << 4) | (w[:, 2] << 8) | (w[:, 3] << 12)
+        packed_i16 = packed_i16.view(n // 4, 4, k // 64, 16).permute(0, 2, 1, 3).reshape(n // 4, k)
+        return packed_i16.to(torch.int16).view(torch.int32).reshape(n // 4, k // 2)
+
+    def test_basic_output_shape(self):
         m, n, k = 1, 64, 128
-        in_feats = torch.randn(m, k, dtype=torch.float16)
-        kernel = torch.randint(-2**31, 2**31 - 1, (n // 4, k // 2), dtype=torch.int32)
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        kernel = self._pack_awq_weight(weight, n, k)
         scaling_factors = torch.ones(k // 64, n, dtype=torch.float16)
         zeros = torch.zeros(k // 64, n, dtype=torch.float16)
+        in_feats = torch.randn(m, k, dtype=torch.float16)
 
-        with pytest.raises(NotImplementedError, match="AWQ W4A16 GEMV fallback is not yet implemented"):
-            awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
+        output = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
+        assert output.shape == (m, n)
+
+    def test_round_trip_unit_scale(self):
+        """Unpack → dequant → matmul with unit scale and zero zeros should match FP matmul."""
+        m, n, k = 2, 64, 128
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        kernel = self._pack_awq_weight(weight, n, k)
+        scaling_factors = torch.ones(k // 64, n, dtype=torch.float16)
+        zeros = torch.zeros(k // 64, n, dtype=torch.float16)
+        in_feats = torch.randn(m, k, dtype=torch.float16)
+
+        output = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
+        expected = in_feats @ weight.to(torch.float16).T
+        assert torch.allclose(output, expected, atol=1e-1)
 
 
 # ── utils device-agnostic tests ──────────────────────────────────────

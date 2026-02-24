@@ -53,7 +53,9 @@ if "nunchaku._C" not in sys.modules:
 
 from nunchaku.ops.torch_fallback import (
     _dequantize_int4,
+    _unpack_awq_int32,
     _unpack_int4,
+    awq_gemv_w4a16_fallback,
     svdq_gemm_w4a4_fallback,
     svdq_quantize_w4a4_act_fuse_lora_fallback,
 )
@@ -339,6 +341,235 @@ class TestSvdqQuantizeW4A4Fallback:
         )
         # All-zero input should produce all-zero quantized output
         assert output[:M].sum() == 0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 2b. AWQ W4A16 GEMV (PyTorch fallback)
+# ══════════════════════════════════════════════════════════════════════
+
+class TestUnpackAwqInt32:
+    """Tests for _unpack_awq_int32: AWQ TinyChat format unpacking."""
+
+    @staticmethod
+    def _pack_awq_weight(weight_uint4, n, k):
+        """Pack a (n, k) uint4 weight into TinyChat AWQ int32 format for testing.
+
+        Reproduces the pack_w4 logic from tinychat_utils.
+        """
+        w = weight_uint4.to(torch.int32)
+        w = w.view(-1, 4, 8)
+        packed_i16 = w[:, 0] | (w[:, 1] << 4) | (w[:, 2] << 8) | (w[:, 3] << 12)
+        packed_i16 = packed_i16.view(n // 4, 4, k // 64, 16).permute(0, 2, 1, 3).reshape(n // 4, k)
+        return packed_i16.to(torch.int16).view(torch.int32).reshape(n // 4, k // 2)
+
+    def test_round_trip(self):
+        """Pack then unpack should recover the original weight matrix."""
+        n, k = 64, 128
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        packed = self._pack_awq_weight(weight, n, k)
+        unpacked = _unpack_awq_int32(packed, n, k)
+        assert torch.equal(unpacked, weight)
+
+    def test_shape(self):
+        n, k = 32, 64
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        packed = self._pack_awq_weight(weight, n, k)
+        unpacked = _unpack_awq_int32(packed, n, k)
+        assert unpacked.shape == (n, k)
+
+    def test_value_range(self):
+        """Unpacked values should always be in [0, 15]."""
+        n, k = 32, 128
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        packed = self._pack_awq_weight(weight, n, k)
+        unpacked = _unpack_awq_int32(packed, n, k)
+        assert unpacked.min() >= 0
+        assert unpacked.max() <= 15
+
+    def test_zero_weight(self):
+        n, k = 32, 64
+        weight = torch.zeros(n, k, dtype=torch.int32)
+        packed = self._pack_awq_weight(weight, n, k)
+        unpacked = _unpack_awq_int32(packed, n, k)
+        assert torch.all(unpacked == 0)
+
+
+class TestAwqGemvW4A16Fallback:
+    """Tests for awq_gemv_w4a16_fallback with small tensors."""
+
+    @staticmethod
+    def _pack_awq_weight(weight_uint4, n, k):
+        w = weight_uint4.to(torch.int32)
+        w = w.view(-1, 4, 8)
+        packed_i16 = w[:, 0] | (w[:, 1] << 4) | (w[:, 2] << 8) | (w[:, 3] << 12)
+        packed_i16 = packed_i16.view(n // 4, 4, k // 64, 16).permute(0, 2, 1, 3).reshape(n // 4, k)
+        return packed_i16.to(torch.int16).view(torch.int32).reshape(n // 4, k // 2)
+
+    def test_basic_output_shape(self):
+        m, n, k = 1, 32, 64
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        kernel = self._pack_awq_weight(weight, n, k)
+        in_feats = torch.randn(m, k, dtype=torch.bfloat16)
+        scaling_factors = torch.ones(k // 64, n, dtype=torch.bfloat16)
+        zeros = torch.zeros(k // 64, n, dtype=torch.bfloat16)
+
+        output = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
+        assert output.shape == (m, n)
+
+    def test_unit_scale_zero_zeros(self):
+        """With scale=1 and zeros=0, GEMV should match direct FP matmul."""
+        m, n, k = 2, 32, 64
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        kernel = self._pack_awq_weight(weight, n, k)
+        in_feats = torch.randn(m, k, dtype=torch.float16)
+        scaling_factors = torch.ones(k // 64, n, dtype=torch.float16)
+        zeros = torch.zeros(k // 64, n, dtype=torch.float16)
+
+        output = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
+        expected = in_feats @ weight.to(torch.float16).T
+        assert torch.allclose(output, expected, atol=1e-1)
+
+    def test_with_scaling(self):
+        """Non-unit scales should change the output."""
+        m, n, k = 1, 32, 64
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        kernel = self._pack_awq_weight(weight, n, k)
+        in_feats = torch.randn(m, k, dtype=torch.float16)
+        scaling_factors = torch.ones(k // 64, n, dtype=torch.float16) * 2.0
+        zeros = torch.zeros(k // 64, n, dtype=torch.float16)
+
+        out_2x = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
+        scaling_factors_1 = torch.ones(k // 64, n, dtype=torch.float16)
+        out_1x = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors_1, zeros, m, n, k)
+        # With scale=2, the output should be roughly double
+        if out_1x.abs().sum() > 0:
+            ratio = out_2x.abs().sum() / out_1x.abs().sum()
+            assert 1.5 < ratio < 2.5
+
+    def test_with_zeros(self):
+        """Non-zero zeros should shift the dequantized weights."""
+        m, n, k = 1, 32, 64
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        kernel = self._pack_awq_weight(weight, n, k)
+        in_feats = torch.randn(m, k, dtype=torch.float16)
+        scaling_factors = torch.ones(k // 64, n, dtype=torch.float16)
+
+        out_no_zeros = awq_gemv_w4a16_fallback(
+            in_feats, kernel, scaling_factors,
+            torch.zeros(k // 64, n, dtype=torch.float16), m, n, k
+        )
+        out_with_zeros = awq_gemv_w4a16_fallback(
+            in_feats, kernel, scaling_factors,
+            torch.ones(k // 64, n, dtype=torch.float16) * -5.0, m, n, k
+        )
+        assert not torch.equal(out_no_zeros, out_with_zeros)
+
+    def test_bfloat16_dtype(self):
+        m, n, k = 2, 32, 64
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        kernel = self._pack_awq_weight(weight, n, k)
+        in_feats = torch.randn(m, k, dtype=torch.bfloat16)
+        scaling_factors = torch.ones(k // 64, n, dtype=torch.bfloat16)
+        zeros = torch.zeros(k // 64, n, dtype=torch.bfloat16)
+
+        output = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
+        assert output.dtype == torch.bfloat16
+
+    def test_batch_size_4(self):
+        """Batched GEMV (m > 1) should work correctly."""
+        m, n, k = 4, 32, 64
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        kernel = self._pack_awq_weight(weight, n, k)
+        in_feats = torch.randn(m, k, dtype=torch.float16)
+        scaling_factors = torch.ones(k // 64, n, dtype=torch.float16)
+        zeros = torch.zeros(k // 64, n, dtype=torch.float16)
+
+        output = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
+        assert output.shape == (m, n)
+
+
+class TestAwqGemvDispatch:
+    """Test that AWQ GEMV dispatch selects the correct backend."""
+
+    def test_forced_torch_backend(self):
+        """Force torch backend for AWQ GEMV and verify it works."""
+        from nunchaku.ops.gemv import awq_gemv_w4a16_cuda
+
+        m, n, k = 2, 32, 64
+        weight = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        w = weight.to(torch.int32).view(-1, 4, 8)
+        packed_i16 = w[:, 0] | (w[:, 1] << 4) | (w[:, 2] << 8) | (w[:, 3] << 12)
+        packed_i16 = packed_i16.view(n // 4, 4, k // 64, 16).permute(0, 2, 1, 3).reshape(n // 4, k)
+        kernel = packed_i16.to(torch.int16).view(torch.int32).reshape(n // 4, k // 2)
+
+        in_feats = torch.randn(m, k, dtype=torch.bfloat16)
+        scaling_factors = torch.ones(k // 64, n, dtype=torch.bfloat16)
+        zeros = torch.zeros(k // 64, n, dtype=torch.bfloat16)
+
+        old_val = os.environ.get("NUNCHAKU_BACKEND")
+        try:
+            os.environ["NUNCHAKU_BACKEND"] = "torch"
+            output = awq_gemv_w4a16_cuda(in_feats, kernel, scaling_factors, zeros, m, n, k)
+            assert output.shape == (m, n)
+        finally:
+            if old_val is None:
+                os.environ.pop("NUNCHAKU_BACKEND", None)
+            else:
+                os.environ["NUNCHAKU_BACKEND"] = old_val
+
+    def test_get_backend_returns_torch_on_cpu(self):
+        from nunchaku.ops.gemv import _get_backend
+        backend = _get_backend("cpu")
+        assert backend == "torch"
+
+
+class TestAWQW4A16LinearOnCPU:
+    """End-to-end tests for AWQW4A16Linear module using fallback."""
+
+    def _make_linear(self, in_f=64, out_f=32, group_size=64):
+        from nunchaku.models.linear import AWQW4A16Linear
+        linear = AWQW4A16Linear(
+            in_features=in_f,
+            out_features=out_f,
+            bias=True,
+            group_size=group_size,
+            torch_dtype=torch.bfloat16,
+            device="cpu",
+        )
+        # Pack valid uint4 weights
+        weight = torch.randint(0, 16, (out_f, in_f), dtype=torch.int32)
+        w = weight.view(-1, 4, 8)
+        packed_i16 = w[:, 0] | (w[:, 1] << 4) | (w[:, 2] << 8) | (w[:, 3] << 12)
+        packed_i16 = packed_i16.view(out_f // 4, 4, in_f // 64, 16).permute(0, 2, 1, 3).reshape(out_f // 4, in_f)
+        packed_i32 = packed_i16.to(torch.int16).view(torch.int32).reshape(out_f // 4, in_f // 2)
+        with torch.no_grad():
+            linear.qweight.copy_(packed_i32)
+            linear.wscales.fill_(1.0)
+            linear.wzeros.fill_(0.0)
+            if linear.bias is not None:
+                linear.bias.zero_()
+        return linear
+
+    def test_forward_shape(self):
+        linear = self._make_linear()
+        x = torch.randn(2, 64, dtype=torch.bfloat16)
+        old_env = os.environ.get("NUNCHAKU_BACKEND")
+        try:
+            os.environ["NUNCHAKU_BACKEND"] = "torch"
+            output = linear(x)
+            assert output.shape == (2, 32)
+        finally:
+            if old_env is None:
+                os.environ.pop("NUNCHAKU_BACKEND", None)
+            else:
+                os.environ["NUNCHAKU_BACKEND"] = old_env
+
+    def test_repr(self):
+        linear = self._make_linear()
+        r = repr(linear)
+        assert "AWQW4A16Linear" in r
+        assert "in_features=64" in r
+        assert "out_features=32" in r
 
 
 # ══════════════════════════════════════════════════════════════════════

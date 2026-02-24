@@ -30,24 +30,24 @@ These are the low-level quantized compute kernels that form the backbone of nunc
      - Backend
      - Notes
    * - ``svdq_gemm_w4a4`` (W4A4 GEMM)
-     - 🔧
+     - ✅
      - PyTorch / Triton
      - INT4 weight × INT4 activation matmul with dequantization.
-       PyTorch fallback available. Triton kernel added for better performance.
+       PyTorch fallback and Triton kernel both available.
    * - ``svdq_quantize_w4a4_act_fuse_lora`` (activation quantization)
-     - 🔧
+     - ✅
      - PyTorch / Triton
      - Per-group absmax quantization to INT4 with fused LoRA down-projection.
-       PyTorch fallback available. Triton kernel added for better performance.
+       PyTorch fallback and Triton kernel both available.
    * - ``awq_gemv_w4a16`` (AWQ GEMV)
-     - ❌
+     - ✅
      - PyTorch
-     - AWQ W4A16 format: 8×int4 packed in int32. Complex unpacking logic.
-       Not yet implemented for non-CUDA devices.
+     - AWQ W4A16 format: 8×int4 packed in int32 (TinyChat format).
+       Full unpacking, dequantization, and matmul implemented via PyTorch fallback.
    * - ``awq_gemm`` (AWQ GEMM)
-     - ❌
+     - ✅
      - PyTorch
-     - AWQ batched GEMM. Not yet implemented for non-CUDA devices.
+     - AWQ batched GEMM. Same fallback as GEMV (handles arbitrary batch sizes).
    * - ``attention_fp16`` (fused attention)
      - ❌
      - PyTorch / Triton
@@ -67,17 +67,17 @@ Higher-level fused operators that combine multiple operations into a single kern
      - Backend
      - Notes
    * - ``fused_gelu_mlp``
-     - 🔧
+     - ✅
      - PyTorch / Triton
      - Fused quantized MLP: linear → GELU → linear.
-       Works via fallback GEMM path.
+       Delegates to ``svdq_gemm_w4a4_cuda`` which dispatches to fallback/Triton.
    * - ``fused_qkv_norm_rotary``
-     - 🔧
+     - ✅
      - PyTorch / Triton
      - Fused QKV projection + RMSNorm + rotary embedding.
-       Works via fallback GEMM path.
+       Delegates to ``svdq_gemm_w4a4_cuda`` which dispatches to fallback/Triton.
    * - ``fused_silu`` (SiLU activation fusion)
-     - 🔧
+     - ✅
      - PyTorch
      - Fused SiLU within GEMM output. Supported via ``fuse_silu`` parameter.
 
@@ -95,22 +95,22 @@ Module-level wrappers that provide ``nn.Module`` interfaces for quantized linear
      - Backend
      - Notes
    * - ``SVDQW4A4Linear.forward``
-     - 🔧
+     - ✅
      - PyTorch / Triton
      - SVDQuant W4A4 quantized linear forward pass.
        Dispatches to fallback on non-CUDA.
    * - ``SVDQW4A4Linear.quantize``
-     - 🔧
+     - ✅
      - PyTorch / Triton
      - Activation quantization + LoRA down-projection.
    * - ``SVDQW4A4Linear.forward_quant``
-     - 🔧
+     - ✅
      - PyTorch / Triton
      - Forward pass with pre-quantized input.
    * - ``AWQW4A16Linear.forward``
-     - ❌
+     - ✅
      - PyTorch
-     - AWQ W4A16 quantized linear forward pass. Blocked by AWQ GEMV.
+     - AWQ W4A16 quantized linear forward pass. Now implemented via PyTorch fallback.
 
 Helper / Utility Operations
 -----------------------------
@@ -133,6 +133,10 @@ INT4 packing, unpacking, dequantization, and other utility operations.
      - ✅
      - PyTorch
      - Dequantize INT4 packed weights using per-group scales.
+   * - ``_unpack_awq_int32``
+     - ✅
+     - PyTorch
+     - Unpack AWQ TinyChat-format int32-packed weights to uint4 weight matrix.
    * - ``pad_tensor``
      - ✅
      - PyTorch
@@ -231,10 +235,10 @@ for operations that can run on Intel XPU (via Triton's XPU backend).
      - Status
      - Notes
    * - ``triton_dequant_gemm_w4a4``
-     - 🔧
+     - ✅
      - Triton-based W4A4 GEMM with INT4 dequantization. Available when ``triton`` is installed.
    * - ``triton_quantize_w4a4_act``
-     - 🔧
+     - ✅
      - Triton-based activation quantization to INT4. Available when ``triton`` is installed.
 
 Backend Selection Priority
@@ -254,7 +258,6 @@ To force a specific backend, set the environment variable::
 Next Steps
 ----------
 
-1. Complete AWQ W4A16 GEMV fallback implementation
-2. Add Triton attention kernel for Intel XPU
-3. Performance benchmarking on Intel XPU hardware
-4. End-to-end model inference validation on Intel XPU
+1. Add Triton attention kernel for Intel XPU
+2. Performance benchmarking on Intel XPU hardware
+3. End-to-end model inference validation on Intel XPU

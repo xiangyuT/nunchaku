@@ -194,6 +194,48 @@ def svdq_quantize_w4a4_act_fuse_lora_fallback(
     return output, oscales, lora_act_out
 
 
+def _unpack_awq_int32(kernel: Tensor, n: int, k: int) -> Tensor:
+    """Unpack AWQ TinyChat-format int32 weights to a ``(n, k)`` uint4 tensor.
+
+    This reverses the ``pack_w4`` packing from TinyChat format, which:
+      1. Reshapes weight ``(n, k)`` to ``(-1, 4, 8)``
+      2. Packs 4 × uint4 into int16: ``int16[j] = val0[j] | (val1[j] << 4) | …``
+      3. Permutes ``(n//4, 4, k//64, 16)`` → ``(n//4, k//64, 4, 16)``
+      4. Stores as ``(n//4, k)`` int16 (viewed as ``(n//4, k//2)`` int32)
+
+    Parameters
+    ----------
+    kernel : Tensor, shape (n // 4, k // 2), dtype int32
+        Packed quantized weights.
+    n : int
+        Number of output features.
+    k : int
+        Number of input features.
+
+    Returns
+    -------
+    Tensor, shape (n, k), dtype int32, values in [0, 15]
+    """
+    # View the int32 data as int16 to recover the original packed int16 values.
+    packed_i16 = kernel.view(torch.int16).reshape(n // 4, k)
+
+    # Reverse the permute(0,2,1,3) and view that was applied during packing.
+    packed_i16 = packed_i16.view(n // 4, k // 64, 4, 16)
+    packed_i16 = packed_i16.permute(0, 2, 1, 3).contiguous()
+    packed_i16 = packed_i16.reshape(-1, 8)  # (n*k//32, 8) int16
+
+    # Extract 4 × uint4 from each int16.
+    # int16[j] was: ic[j] | (ic[8+j] << 4) | (ic[16+j] << 8) | (ic[24+j] << 12)
+    val0 = (packed_i16) & 0xF
+    val1 = (packed_i16 >> 4) & 0xF
+    val2 = (packed_i16 >> 8) & 0xF
+    val3 = (packed_i16 >> 12) & 0xF
+
+    # Stack and reshape to recover the original (n, k) weight matrix.
+    weight = torch.stack([val0, val1, val2, val3], dim=1)  # (-1, 4, 8)
+    return weight.reshape(n, k).to(torch.int32)
+
+
 def awq_gemv_w4a16_fallback(
     in_feats: Tensor,
     kernel: Tensor,
@@ -204,14 +246,47 @@ def awq_gemv_w4a16_fallback(
     k: int,
     group_size: int = 64,
 ) -> Tensor:
-    """Fallback AWQ W4A16 GEMV using pure PyTorch.
+    """Fallback AWQ W4A16 GEMV/GEMM using pure PyTorch.
 
-    .. note::
-        The full AWQ unpacking logic (8 × int4 packed in int32) is non-trivial.
-        This fallback is not yet implemented and will raise ``NotImplementedError``.
-        Contributions for a complete PyTorch-based AWQ dequantization are welcome.
+    Unpacks the TinyChat-format int32-packed weights, dequantizes with
+    per-group scales and zero-points, and performs a standard matmul.
+
+    Parameters
+    ----------
+    in_feats : Tensor, shape (m, k)
+        Input activations.
+    kernel : Tensor, shape (n // 4, k // 2), dtype int32
+        Packed quantized weights (TinyChat format).
+    scaling_factors : Tensor, shape (k // group_size, n)
+        Per-group weight scales.
+    zeros : Tensor, shape (k // group_size, n)
+        Per-group zero-points (pre-scaled/negated as stored by TinyChat).
+    m, n, k : int
+        Matrix dimensions.
+    group_size : int
+        Quantization group size (default 64).
+
+    Returns
+    -------
+    Tensor, shape (m, n)
     """
-    raise NotImplementedError(
-        "AWQ W4A16 GEMV fallback is not yet implemented for non-CUDA devices. "
-        "Please use a CUDA device or contribute a PyTorch-based AWQ dequantization."
-    )
+    compute_dtype = in_feats.dtype
+
+    # Unpack packed int32 → (n, k) uint4 values in [0, 15].
+    weight_uint4 = _unpack_awq_int32(kernel, n, k)
+
+    # Dequantize: w_float = w_uint4 * scale + zeros
+    # scaling_factors: (k // group_size, n), zeros: (k // group_size, n)
+    num_groups = k // group_size
+    weight_fp = weight_uint4.to(compute_dtype).reshape(n, num_groups, group_size)
+    scales_expanded = scaling_factors.T.unsqueeze(-1)   # (n, num_groups, 1)
+    zeros_expanded = zeros.T.unsqueeze(-1)              # (n, num_groups, 1)
+
+    weight_deq = weight_fp * scales_expanded + zeros_expanded
+    weight_deq = weight_deq.reshape(n, k)
+
+    # GEMV/GEMM: output = input @ weight^T
+    x = in_feats if in_feats.dim() == 2 else in_feats.unsqueeze(0)
+    output = x.to(compute_dtype) @ weight_deq.T.to(compute_dtype)
+
+    return output

@@ -3,9 +3,33 @@ Python wrapper for Nunchaku's high-performance GEMV (General Matrix-Vector Multi
 
 On CUDA devices the wrapper delegates to the native C++/CUDA extension.
 On other devices (e.g. Intel XPU) a pure-PyTorch fallback is used automatically.
+
+Backend selection priority (configurable via ``NUNCHAKU_BACKEND`` env var):
+    1. ``cuda``  – native C++/CUDA extension (best performance on NVIDIA GPUs)
+    2. ``torch``  – pure-PyTorch fallback (any device)
 """
 
+import os
+
 import torch
+
+
+def _get_backend(device_type: str) -> str:
+    """Determine which backend to use for the AWQ GEMV."""
+    forced = os.environ.get("NUNCHAKU_BACKEND", "").lower().strip()
+    if forced in ("cuda", "triton", "torch"):
+        # Triton path falls through to torch for AWQ
+        return "cuda" if forced == "cuda" else "torch"
+
+    if device_type == "cuda":
+        try:
+            from .._C import ops as _ops  # noqa: F401
+
+            return "cuda"
+        except ImportError:
+            pass
+
+    return "torch"
 
 
 def awq_gemv_w4a16_cuda(
@@ -55,8 +79,9 @@ def awq_gemv_w4a16_cuda(
     - group_size: quantization group size
     """
     _device_type = in_feats.device.type if in_feats is not None else "cuda"
+    _backend = _get_backend(_device_type)
 
-    if _device_type == "cuda":
+    if _backend == "cuda":
         try:
             from .._C import ops
 

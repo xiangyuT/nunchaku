@@ -134,7 +134,8 @@ def svdq_gemm_w4a4_fallback(
         result = torch.nn.functional.silu(result)
 
     if out is not None:
-        out[:M].copy_(result[:M])
+        out_M = min(M, out.shape[0])
+        out[:out_M].copy_(result[:out_M])
 
 
 def svdq_quantize_w4a4_act_fuse_lora_fallback(

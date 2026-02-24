@@ -2,8 +2,11 @@
 This module provides Python wrappers for Nunchaku's high-performance SVDQuant quantization kernels.
 
 On CUDA devices the wrapper delegates to the native C++/CUDA extension.
-On other devices (e.g. Intel XPU) a pure-PyTorch fallback is used automatically.
+On other devices (e.g. Intel XPU) a Triton kernel or pure-PyTorch fallback
+is used automatically.
 """
+
+import os
 
 import torch
 
@@ -87,6 +90,19 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
 
             ops.quantize_w4a4_act_fuse_lora(input, output, oscales, lora_down, lora_act_out, smooth, fuse_glu, fp4)
             return output, oscales, lora_act_out
+        except ImportError:
+            pass
+
+    # Try Triton backend if available and requested
+    forced_backend = os.environ.get("NUNCHAKU_BACKEND", "").lower().strip()
+    if forced_backend == "triton" or (forced_backend != "torch"):
+        try:
+            from .triton_kernels import is_triton_available, triton_quantize_w4a4_act
+
+            if is_triton_available():
+                return triton_quantize_w4a4_act(
+                    input, smooth=smooth, lora_down=lora_down, fp4=fp4, pad_size=pad_size
+                )
         except ImportError:
             pass
 

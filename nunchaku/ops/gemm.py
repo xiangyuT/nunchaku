@@ -2,11 +2,18 @@
 Python wrappers for Nunchaku's high-performance quantized GEMM (General Matrix-Matrix Multiplication) kernels.
 
 On CUDA devices the wrapper delegates to the native C++/CUDA extension.
-On other devices (e.g. Intel XPU) a pure-PyTorch fallback is used
-automatically so that the rest of the model code stays device-agnostic.
+On other devices (e.g. Intel XPU) a Triton kernel is used when available,
+otherwise a pure-PyTorch fallback is used automatically so that the rest of
+the model code stays device-agnostic.
+
+Backend selection priority (configurable via ``NUNCHAKU_BACKEND`` env var):
+    1. ``cuda``  – native C++/CUDA extension (best performance on NVIDIA GPUs)
+    2. ``triton`` – portable Triton kernels (CUDA and Intel XPU)
+    3. ``torch``  – pure-PyTorch fallback (any device)
 """
 
 import math
+import os
 
 import torch
 
@@ -19,6 +26,33 @@ def _is_cuda_backend_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _get_backend(device_type: str) -> str:
+    """Determine which backend to use for the given device type.
+
+    The ``NUNCHAKU_BACKEND`` environment variable can force a specific backend.
+    Valid values are ``cuda``, ``triton``, or ``torch``.
+
+    Returns
+    -------
+    str
+        One of ``"cuda"``, ``"triton"``, or ``"torch"``.
+    """
+    forced = os.environ.get("NUNCHAKU_BACKEND", "").lower().strip()
+    if forced in ("cuda", "triton", "torch"):
+        return forced
+
+    # auto-select
+    if device_type == "cuda" and _is_cuda_backend_available():
+        return "cuda"
+
+    from .triton_kernels import is_triton_available
+
+    if is_triton_available():
+        return "triton"
+
+    return "torch"
 
 
 def svdq_gemm_w4a4_cuda(
@@ -136,8 +170,9 @@ def svdq_gemm_w4a4_cuda(
     """
     # Determine the device of the primary tensor to decide backend.
     _device_type = act.device.type if act is not None else "cuda"
+    _backend = _get_backend(_device_type)
 
-    if _device_type == "cuda" and _is_cuda_backend_available():
+    if _backend == "cuda":
         from .._C import ops
 
         if lora_scales is None:
@@ -176,6 +211,32 @@ def svdq_gemm_w4a4_cuda(
             out_v,
             attn_tokens,
         )
+    elif _backend == "triton":
+        from .triton_kernels import triton_dequant_gemm_w4a4
+
+        group_size = 16 if fp4 else 64
+        M = act.shape[0]
+
+        # Triton path: basic dequant GEMM + LoRA handled in PyTorch
+        triton_out = triton_dequant_gemm_w4a4(
+            act=act,
+            wgt=wgt,
+            ascales=ascales,
+            wscales=wscales,
+            out=out,
+            bias=bias,
+            group_size=group_size,
+        )
+
+        # LoRA residual (handled in PyTorch on top of Triton GEMM)
+        if lora_act_in is not None and lora_up is not None:
+            compute_dtype = wscales.dtype if wscales is not None else torch.bfloat16
+            lora_result = lora_act_in[:M].to(compute_dtype) @ lora_up.T.to(compute_dtype)
+            if out is not None:
+                out[:M] += lora_result[:M].to(out.dtype)
+
+        if fuse_silu and out is not None:
+            out[:M] = torch.nn.functional.silu(out[:M])
     else:
         from .torch_fallback import svdq_gemm_w4a4_fallback
 

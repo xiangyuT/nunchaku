@@ -338,7 +338,16 @@ def load_quantized_module(
     elif isinstance(pag_layers, int):
         pag_layers = [pag_layers]
     device = torch.device(device)
-    assert device.type == "cuda"
+    assert device.type in ("cuda", "xpu"), (
+        f"load_quantized_module requires a CUDA or XPU device, got '{device.type}'. "
+        "The C++ quantized backend currently only supports CUDA. "
+        "For Intel XPU, use the Python-based fallback path."
+    )
+    if device.type != "cuda":
+        raise NotImplementedError(
+            "The C++ QuantizedSanaModel backend is CUDA-only. "
+            "Intel XPU support is planned via PyTorch fallback kernels."
+        )
 
     m = QuantizedSanaModel()
     cutils.disable_memory_auto_release()

@@ -1,12 +1,24 @@
 """
-Python wrappers for Nunchaku's high-performance quantized GEMM (General Matrix-Matrix Multiplication) CUDA kernels.
+Python wrappers for Nunchaku's high-performance quantized GEMM (General Matrix-Matrix Multiplication) kernels.
+
+On CUDA devices the wrapper delegates to the native C++/CUDA extension.
+On other devices (e.g. Intel XPU) a pure-PyTorch fallback is used
+automatically so that the rest of the model code stays device-agnostic.
 """
 
 import math
 
 import torch
 
-from .._C import ops
+
+def _is_cuda_backend_available() -> bool:
+    """Return True when the native CUDA extension can be loaded."""
+    try:
+        from .._C import ops as _ops  # noqa: F401
+
+        return True
+    except Exception:
+        return False
 
 
 def svdq_gemm_w4a4_cuda(
@@ -122,39 +134,84 @@ def svdq_gemm_w4a4_cuda(
     - H: number of heads
     - D: head dimension
     """
-    if lora_scales is None:
-        rank = lora_up.shape[1]
-        lora_scales = [1.0] * math.ceil(rank / 16)
-    if alpha is None:
-        alpha = 1.0
-    ops.gemm_w4a4(
-        act,
-        wgt,
-        out,
-        qout,
-        ascales,
-        wscales,
-        oscales,
-        poolout,
-        lora_act_in,
-        lora_up,
-        lora_down,
-        lora_act_out,
-        norm_q,
-        norm_k,
-        rotary_emb,
-        bias,
-        smooth_factor,
-        out_vk,
-        out_linearattn,
-        act_unsigned,
-        lora_scales,
-        fuse_silu,
-        fp4,
-        alpha,
-        wcscales,
-        out_q,
-        out_k,
-        out_v,
-        attn_tokens,
-    )
+    # Determine the device of the primary tensor to decide backend.
+    _device_type = act.device.type if act is not None else "cuda"
+
+    if _device_type == "cuda" and _is_cuda_backend_available():
+        from .._C import ops
+
+        if lora_scales is None:
+            rank = lora_up.shape[1]
+            lora_scales = [1.0] * math.ceil(rank / 16)
+        if alpha is None:
+            alpha = 1.0
+        ops.gemm_w4a4(
+            act,
+            wgt,
+            out,
+            qout,
+            ascales,
+            wscales,
+            oscales,
+            poolout,
+            lora_act_in,
+            lora_up,
+            lora_down,
+            lora_act_out,
+            norm_q,
+            norm_k,
+            rotary_emb,
+            bias,
+            smooth_factor,
+            out_vk,
+            out_linearattn,
+            act_unsigned,
+            lora_scales,
+            fuse_silu,
+            fp4,
+            alpha,
+            wcscales,
+            out_q,
+            out_k,
+            out_v,
+            attn_tokens,
+        )
+    else:
+        from .torch_fallback import svdq_gemm_w4a4_fallback
+
+        if lora_scales is None and lora_up is not None:
+            rank = lora_up.shape[1]
+            lora_scales = [1.0] * math.ceil(rank / 16)
+        if alpha is None:
+            alpha = 1.0
+        svdq_gemm_w4a4_fallback(
+            act=act,
+            wgt=wgt,
+            out=out,
+            qout=qout,
+            ascales=ascales,
+            wscales=wscales,
+            oscales=oscales,
+            poolout=poolout,
+            lora_act_in=lora_act_in,
+            lora_up=lora_up,
+            lora_down=lora_down,
+            lora_act_out=lora_act_out,
+            norm_q=norm_q,
+            norm_k=norm_k,
+            rotary_emb=rotary_emb,
+            bias=bias,
+            smooth_factor=smooth_factor,
+            out_vk=out_vk,
+            out_linearattn=out_linearattn,
+            act_unsigned=act_unsigned,
+            lora_scales=lora_scales,
+            fuse_silu=fuse_silu,
+            fp4=fp4,
+            alpha=alpha,
+            wcscales=wcscales,
+            out_q=out_q,
+            out_k=out_k,
+            out_v=out_v,
+            attn_tokens=attn_tokens,
+        )

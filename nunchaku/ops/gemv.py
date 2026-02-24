@@ -1,10 +1,11 @@
 """
-Python wrapper for Nunchaku's high-performance GEMV (General Matrix-Vector Multiplication) CUDA kernels.
+Python wrapper for Nunchaku's high-performance GEMV (General Matrix-Vector Multiplication) kernels.
+
+On CUDA devices the wrapper delegates to the native C++/CUDA extension.
+On other devices (e.g. Intel XPU) a pure-PyTorch fallback is used automatically.
 """
 
 import torch
-
-from .._C import ops
 
 
 def awq_gemv_w4a16_cuda(
@@ -53,4 +54,16 @@ def awq_gemv_w4a16_cuda(
     - k: input features
     - group_size: quantization group size
     """
-    return ops.gemv_awq(in_feats, kernel, scaling_factors, zeros, m, n, k, group_size)
+    _device_type = in_feats.device.type if in_feats is not None else "cuda"
+
+    if _device_type == "cuda":
+        try:
+            from .._C import ops
+
+            return ops.gemv_awq(in_feats, kernel, scaling_factors, zeros, m, n, k, group_size)
+        except Exception:
+            pass
+
+    from .torch_fallback import awq_gemv_w4a16_fallback
+
+    return awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k, group_size)

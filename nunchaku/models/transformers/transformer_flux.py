@@ -448,7 +448,16 @@ def load_quantized_module(
         Loaded quantized model.
     """
     device = torch.device(device)
-    assert device.type == "cuda"
+    assert device.type in ("cuda", "xpu"), (
+        f"load_quantized_module requires a CUDA or XPU device, got '{device.type}'. "
+        "The C++ quantized backend currently only supports CUDA. "
+        "For other devices, use the Python-based model (e.g. NunchakuFluxTransformer2DModelV2)."
+    )
+    if device.type != "cuda":
+        raise NotImplementedError(
+            "The C++ QuantizedFluxModel backend is CUDA-only. "
+            "Intel XPU support is available via the Python-based V2 model path."
+        )
     m = QuantizedFluxModel()
     cutils.disable_memory_auto_release()
     m.init(use_fp4, offload, bf16, 0 if device.index is None else device.index)

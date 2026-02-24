@@ -570,6 +570,7 @@ class TestAWQW4A16LinearOnCPU:
         assert "AWQW4A16Linear" in r
         assert "in_features=64" in r
         assert "out_features=32" in r
+        assert "group_size=64" in r
 
 
 # ══════════════════════════════════════════════════════════════════════

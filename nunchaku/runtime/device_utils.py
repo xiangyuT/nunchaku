@@ -131,10 +131,10 @@ class DeviceStream:
         if device is not None and isinstance(device, str):
             device = torch.device(device)
         self._device = device
-        dtype = device.type if device is not None else "cuda"
-        if dtype == "cuda":
+        device_type = device.type if device is not None else "cuda"
+        if device_type == "cuda":
             self._stream = torch.cuda.Stream(device=device)
-        elif dtype == "xpu":
+        elif device_type == "xpu":
             self._stream = torch.xpu.Stream(device=device)
         else:
             self._stream = None  # no-op on unsupported backends
@@ -168,10 +168,10 @@ class DeviceEvent:
         if device is not None and isinstance(device, str):
             device = torch.device(device)
         self._device = device
-        dtype = device.type if device is not None else "cuda"
-        if dtype == "cuda":
+        device_type = device.type if device is not None else "cuda"
+        if device_type == "cuda":
             self._event = torch.cuda.Event(blocking=blocking)
-        elif dtype == "xpu":
+        elif device_type == "xpu":
             self._event = torch.xpu.Event()
         else:
             self._event = None
@@ -204,10 +204,10 @@ def current_stream(device: torch.device | str | None = None):
     """Return the current backend stream for *device*."""
     if device is not None and isinstance(device, str):
         device = torch.device(device)
-    dtype = device.type if device is not None else "cuda"
-    if dtype == "cuda":
+    device_type = device.type if device is not None else "cuda"
+    if device_type == "cuda":
         return torch.cuda.current_stream(device)
-    elif dtype == "xpu":
+    elif device_type == "xpu":
         return torch.xpu.current_stream(device)
     return None
 
@@ -233,10 +233,10 @@ def empty_cache(device: torch.device | str | None = None) -> None:
     """Release unused cached memory on the given device."""
     if device is not None and isinstance(device, str):
         device = torch.device(device)
-    dtype = device.type if device is not None else "cuda"
-    if dtype == "cuda":
+    device_type = device.type if device is not None else "cuda"
+    if device_type == "cuda":
         torch.cuda.empty_cache()
-    elif dtype == "xpu":
+    elif device_type == "xpu":
         torch.xpu.empty_cache()
 
 
@@ -244,8 +244,8 @@ def synchronize_device(device: torch.device | str | None = None) -> None:
     """Block until all pending work on *device* has finished."""
     if device is not None and isinstance(device, str):
         device = torch.device(device)
-    dtype = device.type if device is not None else "cuda"
-    if dtype == "cuda":
+    device_type = device.type if device is not None else "cuda"
+    if device_type == "cuda":
         torch.cuda.synchronize(device)
-    elif dtype == "xpu":
+    elif device_type == "xpu":
         torch.xpu.synchronize(device)

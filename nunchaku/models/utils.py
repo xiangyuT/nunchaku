@@ -19,6 +19,13 @@ from ..runtime.device_utils import (
 from ..utils import copy_params_into
 
 
+def _get_raw(obj):
+    """Unwrap a :class:`DeviceStream` or :class:`DeviceEvent` to its backend object."""
+    if isinstance(obj, (DeviceStream, DeviceEvent)):
+        return obj.raw
+    return obj
+
+
 def fuse_linears(linears: list[nn.Linear]) -> nn.Linear:
     """
     Fuse a list of nn.Linear layers into a single nn.Linear with concatenated output features.
@@ -213,29 +220,29 @@ class CPUOffloadManager:
         next_compute_done = create_event(self.device)
         next_compute_done.record(compute_stream)
         with stream_context(self.memory_stream):
-            raw_memory_stream = self.memory_stream.raw if isinstance(self.memory_stream, DeviceStream) else self.memory_stream
-            if raw_memory_stream is not None:
-                raw_compute_done = self.compute_done.raw if isinstance(self.compute_done, DeviceEvent) else self.compute_done
-                if raw_compute_done is not None:
-                    raw_memory_stream.wait_event(raw_compute_done)
+            raw_mem = _get_raw(self.memory_stream)
+            if raw_mem is not None:
+                raw_cd = _get_raw(self.compute_done)
+                if raw_cd is not None:
+                    raw_mem.wait_event(raw_cd)
             self.load_block(self.current_block_idx + 1)  # if the current block is the last block, load the first block
             next_memory_done = create_event(self.device)
-            raw_memory_stream2 = self.memory_stream.raw if isinstance(self.memory_stream, DeviceStream) else self.memory_stream
-            if raw_memory_stream2 is not None:
-                next_memory_done.record(raw_memory_stream2)
+            raw_mem2 = _get_raw(self.memory_stream)
+            if raw_mem2 is not None:
+                next_memory_done.record(raw_mem2)
         self.memory_done = next_memory_done
         self.compute_done = next_compute_done
         self.current_block_idx += 1
         if self.current_block_idx < len(self.blocks):
             # get ready for the next compute
-            raw_memory_done = self.memory_done.raw if isinstance(self.memory_done, DeviceEvent) else self.memory_done
-            if raw_memory_done is not None and compute_stream is not None:
-                compute_stream.wait_event(raw_memory_done)
+            raw_md = _get_raw(self.memory_done)
+            if raw_md is not None and compute_stream is not None:
+                compute_stream.wait_event(raw_md)
         else:
             # ready to finish
-            raw_compute_done = self.compute_done.raw if isinstance(self.compute_done, DeviceEvent) else self.compute_done
-            if raw_compute_done is not None and compute_stream is not None:
-                compute_stream.wait_event(raw_compute_done)
+            raw_cd2 = _get_raw(self.compute_done)
+            if raw_cd2 is not None and compute_stream is not None:
+                compute_stream.wait_event(raw_cd2)
             self.current_block_idx = 0
             self.forward_counter += 1
             if self.empty_cache_freq > 0 and self.forward_counter % self.empty_cache_freq == 0:

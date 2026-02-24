@@ -17,7 +17,7 @@ def _is_cuda_backend_available() -> bool:
         from .._C import ops as _ops  # noqa: F401
 
         return True
-    except Exception:
+    except ImportError:
         return False
 
 

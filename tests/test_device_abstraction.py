@@ -211,16 +211,15 @@ class TestSvdqQuantizeW4A4ActFuseLoraFallback:
 class TestAwqGemvW4A16Fallback:
     """Tests for the fallback AWQ GEMV."""
 
-    def test_output_shape(self):
+    def test_raises_not_implemented(self):
         m, n, k = 1, 64, 128
         in_feats = torch.randn(m, k, dtype=torch.float16)
         kernel = torch.randint(-2**31, 2**31 - 1, (n // 4, k // 2), dtype=torch.int32)
         scaling_factors = torch.ones(k // 64, n, dtype=torch.float16)
         zeros = torch.zeros(k // 64, n, dtype=torch.float16)
 
-        result = awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
-        assert result.shape == (m, n)
-        assert result.dtype == torch.float16
+        with pytest.raises(NotImplementedError, match="AWQ W4A16 GEMV fallback is not yet implemented"):
+            awq_gemv_w4a16_fallback(in_feats, kernel, scaling_factors, zeros, m, n, k)
 
 
 # ── utils device-agnostic tests ──────────────────────────────────────

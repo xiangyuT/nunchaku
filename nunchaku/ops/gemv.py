@@ -61,7 +61,7 @@ def awq_gemv_w4a16_cuda(
             from .._C import ops
 
             return ops.gemv_awq(in_feats, kernel, scaling_factors, zeros, m, n, k, group_size)
-        except Exception:
+        except ImportError:
             pass
 
     from .torch_fallback import awq_gemv_w4a16_fallback

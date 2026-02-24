@@ -205,15 +205,12 @@ def awq_gemv_w4a16_fallback(
 ) -> Tensor:
     """Fallback AWQ W4A16 GEMV using pure PyTorch.
 
-    Unpacks the AWQ-packed weight, dequantizes, and performs a standard matmul.
+    .. note::
+        The full AWQ unpacking logic (8 × int4 packed in int32) is non-trivial.
+        This fallback is not yet implemented and will raise ``NotImplementedError``.
+        Contributions for a complete PyTorch-based AWQ dequantization are welcome.
     """
-    # AWQ packs 8 × int4 values per int32
-    # kernel shape: (n // 4, k // 2) in int32 → contains n × k int4 values
-    # We do a simplified dequantization
-    compute_dtype = in_feats.dtype
-
-    # Simplified: treat as fp16 matmul with dequantized weights
-    # Real AWQ unpacking is complex; this is a functional approximation
-    out = torch.zeros(m, n, dtype=compute_dtype, device=in_feats.device)
-
-    return out
+    raise NotImplementedError(
+        "AWQ W4A16 GEMV fallback is not yet implemented for non-CUDA devices. "
+        "Please use a CUDA device or contribute a PyTorch-based AWQ dequantization."
+    )

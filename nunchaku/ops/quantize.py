@@ -87,7 +87,7 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
 
             ops.quantize_w4a4_act_fuse_lora(input, output, oscales, lora_down, lora_act_out, smooth, fuse_glu, fp4)
             return output, oscales, lora_act_out
-        except Exception:
+        except ImportError:
             pass
 
     from .torch_fallback import svdq_quantize_w4a4_act_fuse_lora_fallback

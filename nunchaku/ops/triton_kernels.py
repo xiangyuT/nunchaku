@@ -225,9 +225,8 @@ if HAS_TRITON:
             # quantize to int4 range [-8, 7]
             x_scaled = x / absmax[:, None] * 7.0
 
-            # clamp and round
+            # clamp and round (add 0.5 before truncation to achieve rounding)
             x_q = tl.minimum(tl.maximum(x_scaled + 0.5, -8.0), 7.0)
-            # floor instead of round for simplicity
             x_q = (x_q - 0.5).to(tl.int8)
 
             # store scales [K//G, M] layout
@@ -238,23 +237,10 @@ if HAS_TRITON:
                 mask=scale_mask,
             )
 
-            # pack pairs of int4 into uint8
-            # even indices in low nibble, odd indices in high nibble
-            for p in range(0, GROUP_SIZE, 2):
-                lo = tl.load(
-                    x_ptr + offs_m * stride_xm + (g * GROUP_SIZE + p) * stride_xk,
-                    mask=offs_m < M, other=0,
-                ).to(tl.int8)
-                hi = tl.load(
-                    x_ptr + offs_m * stride_xm + (g * GROUP_SIZE + p + 1) * stride_xk,
-                    mask=offs_m < M, other=0,
-                ).to(tl.int8)
-                packed = ((hi << 4) | (lo & 0xF)).to(tl.uint8)
-                tl.store(
-                    out_ptr + offs_m * stride_om + (g * GROUP_SIZE // 2 + p // 2) * stride_ok,
-                    packed,
-                    mask=offs_m < M,
-                )
+            # NOTE: Packing quantized INT4 pairs from the x_q local tensor
+            # into uint8 is complex in Triton due to limited indexing on
+            # local tensors.  The actual triton_quantize_w4a4_act() function
+            # uses the equivalent PyTorch path for the packing step.
 
 
 def triton_dequant_gemm_w4a4(

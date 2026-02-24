@@ -95,7 +95,7 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
 
     # Try Triton backend if available and requested
     forced_backend = os.environ.get("NUNCHAKU_BACKEND", "").lower().strip()
-    if forced_backend == "triton" or (forced_backend != "torch"):
+    if forced_backend == "triton" or (forced_backend == "" and _device_type != "cuda"):
         try:
             from .triton_kernels import is_triton_available, triton_quantize_w4a4_act
 

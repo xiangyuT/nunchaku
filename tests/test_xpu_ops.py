@@ -91,7 +91,7 @@ class TestUnpackInt4:
 
     def test_known_values(self):
         """Verify specific known INT4 values after unpacking."""
-        # Pack: low=3, high=-2 → packed byte = (-2 << 4) | (3 & 0xF)
+        # Pack: low=3, high=-2 → packed byte = (high << 4) | (low & 0xF)
         low, high = 3, -2
         packed = torch.tensor([[(high << 4) | (low & 0xF)]], dtype=torch.int8)
         unpacked = _unpack_int4(packed)

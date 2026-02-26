@@ -28,18 +28,22 @@ The tests validate:
 """
 
 import json
+import logging
 import math
 import os
 import importlib.util
+import pathlib
 import sys
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
+
 # Import reference ops directly via importlib to avoid pulling in the full
 # nunchaku package (which requires accelerate, diffusers, etc.).
-_ref_path = os.path.join(os.path.dirname(__file__), "..", "nunchaku", "ops", "reference.py")
+_ref_path = str(pathlib.Path(__file__).resolve().parent.parent / "nunchaku" / "ops" / "reference.py")
 _ref_spec = importlib.util.spec_from_file_location("nunchaku_ops_reference", _ref_path)
 _ref_mod = importlib.util.module_from_spec(_ref_spec)
 _ref_spec.loader.exec_module(_ref_mod)
@@ -69,7 +73,10 @@ def _resolve_model_path() -> str:
 
 def _load_safetensors(path: str) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
     """Load safetensors from local file or HuggingFace Hub."""
-    import safetensors
+    try:
+        import safetensors
+    except ImportError:
+        raise ImportError("safetensors package is required: pip install safetensors")
 
     local_path = path
     if not os.path.isfile(local_path):
@@ -153,7 +160,7 @@ class TestDequantizeInt4:
         w = _extract_linear_weights(state_dict, prefix)
 
         dequantized = dequantize_int4(w["qweight"], w["wscales"], group_size=INT4_GROUP_SIZE)
-        # Typical model weights should be within [-10, 10] for quantized models
+        # Quantized model weights should have bounded magnitude
         assert dequantized.abs().max() < 100, f"Dequantized weights have unexpectedly large values: {dequantized.abs().max()}"
 
 
@@ -207,9 +214,15 @@ class TestRMSNorm:
         # Find a norm weight in the state dict
         norm_key = None
         for k in state_dict:
-            if "norm_q" in k and "weight" in k and state_dict[k].ndim == 1:
+            if ".norm_q.weight" in k and state_dict[k].ndim == 1:
                 norm_key = k
                 break
+        if norm_key is None:
+            # Fallback: try fused module naming
+            for k in state_dict:
+                if k.endswith("norm_q_weight") and state_dict[k].ndim == 1:
+                    norm_key = k
+                    break
         if norm_key is None:
             pytest.skip("No norm_q weight found in model")
 
@@ -574,11 +587,11 @@ class TestEndToEndLinear:
         mean_relative_error = relative_error.mean().item()
         max_abs_error = (output - fp_output).abs().max().item()
 
-        print(f"\n[End-to-end linear test]")
-        print(f"  Layer: {prefix}")
-        print(f"  Shape: in={in_features}, out={out_features}, rank={rank}")
-        print(f"  Mean relative error: {mean_relative_error:.6f}")
-        print(f"  Max absolute error: {max_abs_error:.4f}")
+        logger.info(
+            "End-to-end linear test — Layer: %s, Shape: in=%d, out=%d, rank=%d, "
+            "Mean relative error: %.6f, Max absolute error: %.4f",
+            prefix, in_features, out_features, rank, mean_relative_error, max_abs_error,
+        )
 
         # The quantization error is expected to be non-trivial but bounded.
         # We check that the mean relative error is within a reasonable range.
@@ -606,7 +619,7 @@ class TestModelMetadata:
         if "quantization_config" in metadata:
             qconfig = json.loads(metadata["quantization_config"])
             assert isinstance(qconfig, dict)
-            print(f"\nQuantization config: {json.dumps(qconfig, indent=2)}")
+            logger.info("Quantization config: %s", json.dumps(qconfig, indent=2))
 
     def test_state_dict_has_expected_keys(self, model_weights):
         state_dict, _ = model_weights

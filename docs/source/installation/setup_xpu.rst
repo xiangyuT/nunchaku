@@ -120,7 +120,7 @@ do not require the extension.
 
     git clone --recurse-submodules https://github.com/nunchaku-tech/nunchaku.git
     cd nunchaku
-    pip install -e ".[dev]" --no-build-isolation 2>/dev/null || pip install -e "."
+    pip install -e ".[dev]" --no-build-isolation || pip install -e "."
 
 .. note::
 
@@ -343,7 +343,7 @@ available device (XPU if available, otherwise CPU):
 
     # Initialize with random data
     with torch.no_grad():
-        linear.qweight.copy_(torch.randint(-128, 127, linear.qweight.shape, dtype=torch.int8))
+        linear.qweight.copy_(torch.randint(-128, 128, linear.qweight.shape, dtype=torch.int8))
         linear.wscales.normal_()
         linear.smooth_factor.fill_(1.0)
         linear.proj_down.normal_()

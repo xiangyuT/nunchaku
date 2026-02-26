@@ -50,6 +50,7 @@ NVFP4_GROUP_SIZE: int = 16
 #   0b1100 -> -2.0,  0b1101 -> -3.0, 0b1110 -> -4.0, 0b1111 -> -6.0,
 _E2M1_LUT: list[float] = [
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    # Negative zero (-0.0) is kept for E2M1 encoding fidelity (bit pattern 0b1000).
     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
 ]
 
@@ -105,6 +106,7 @@ def dequantize_int4(
     num_groups = K // group_size
     unpacked = unpacked.reshape(M, num_groups, group_size)
     # scales: (num_groups, M) → (M, num_groups, 1)
+    assert scales.shape[1] >= M, f"scales has {scales.shape[1]} columns but need at least {M}"
     scales_expanded = scales[:, :M].permute(1, 0).unsqueeze(-1).to(unpacked.dtype)
     unpacked = unpacked * scales_expanded
     return unpacked.reshape(M, K)
@@ -147,6 +149,7 @@ def dequantize_nvfp4(
     num_groups = K // group_size
     unpacked = unpacked.reshape(M, num_groups, group_size)
     # scales: (num_groups, M) → (M, num_groups, 1)
+    assert scales.shape[1] >= M, f"scales has {scales.shape[1]} columns but need at least {M}"
     scales_f32 = scales[:, :M].to(torch.float32).permute(1, 0).unsqueeze(-1)
     unpacked = unpacked * scales_f32
     return unpacked.reshape(M, K)
@@ -443,6 +446,8 @@ def gemm_w4a4_reference(
     alpha: float = 1.0,
     wcscales: Optional[torch.Tensor] = None,
     head_dim: int = 128,
+    num_q_heads: Optional[int] = None,
+    num_k_heads: Optional[int] = None,
 ) -> dict[str, Optional[torch.Tensor]]:
     """Reference implementation of the W4A4 quantized GEMM.
 
@@ -497,6 +502,12 @@ def gemm_w4a4_reference(
         Per-channel weight scale (NVFP4).
     head_dim : int
         Head dimension for QKV-norm-rotary mode.
+    num_q_heads : int or None
+        Number of query heads (for QKV-norm-rotary mode). If None, inferred
+        as ``N // (3 * head_dim)``.
+    num_k_heads : int or None
+        Number of key heads (for QKV-norm-rotary mode). Defaults to
+        *num_q_heads*.
 
     Returns
     -------
@@ -582,29 +593,22 @@ def gemm_w4a4_reference(
 
     # --- Step 6: RMSNorm + Rotary (QKV projection mode) ---
     if norm_q is not None:
-        # Split output into Q, K, V heads
-        num_heads_qk = norm_q.shape[0] // head_dim if norm_q.ndim > 1 else N // head_dim
-        # Assume output is [M, N] where N = num_q_heads * head_dim + num_k_heads * head_dim + num_v_heads * head_dim
-        # For FLUX: Q and K each have some heads, V has the rest
-        # Apply RMSNorm per head to Q and K portions
         out_normed = out.clone()
 
-        # Apply RMSNorm to Q heads
-        q_dim = N  # In the general case, Q/K/V dimensions are model-specific
-        if norm_q is not None and norm_k is not None:
+        if norm_k is not None:
             # Reshape to heads for RMSNorm
             out_heads = out_normed.reshape(M, -1, head_dim)
             num_total_heads = out_heads.shape[1]
-            # Determine Q/K split (assume Q and K have equal heads, rest is V)
-            num_qk_heads = num_total_heads // 3  # Rough heuristic
-            for h in range(num_qk_heads):
+            nq = num_q_heads if num_q_heads is not None else num_total_heads // 3
+            nk = num_k_heads if num_k_heads is not None else nq
+            for h in range(nq):
                 out_heads[:, h, :] = rms_norm_reference(out_heads[:, h, :], norm_q)
-            for h in range(num_qk_heads, 2 * num_qk_heads):
+            for h in range(nq, nq + nk):
                 out_heads[:, h, :] = rms_norm_reference(out_heads[:, h, :], norm_k)
 
             # Apply rotary embeddings to Q and K
             if rotary_emb_sin is not None and rotary_emb_cos is not None:
-                for h in range(2 * num_qk_heads):
+                for h in range(nq + nk):
                     out_heads[:, h, :] = apply_rotary_emb_reference(
                         out_heads[:, h, :], rotary_emb_sin, rotary_emb_cos
                     )
@@ -620,7 +624,8 @@ def gemm_w4a4_reference(
         if fp4:
             q_packed, q_scales = quantize_to_nvfp4(smoothed.to(torch.float32))
         else:
-            q_packed, q_scales = quantize_to_int4(smoothed.to(torch.float32), unsigned=not fp4)
+            # INT4 mode: after GELU + shift, values are non-negative → use unsigned quantization
+            q_packed, q_scales = quantize_to_int4(smoothed.to(torch.float32), unsigned=True)
         result["out_quantized"] = q_packed
         result["out_oscales"] = q_scales
 

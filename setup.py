@@ -7,10 +7,27 @@ from datetime import date
 import setuptools
 import torch
 from packaging import version as packaging_version
-from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
+
+# ---------------------------------------------------------------------------
+# Detect whether CUDA is available.  On non-CUDA platforms (e.g. Intel XPU)
+# the native C++/CUDA extension is skipped and nunchaku falls back to the
+# PyTorch / Triton backends at runtime.
+# ---------------------------------------------------------------------------
+_CUDA_AVAILABLE = torch.cuda.is_available() or os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+try:
+    from torch.utils.cpp_extension import CUDA_HOME
+
+    if CUDA_HOME is None:
+        _CUDA_AVAILABLE = False
+except ImportError:
+    _CUDA_AVAILABLE = False
+    CUDA_HOME = None
+
+if _CUDA_AVAILABLE:
+    from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
-class CustomBuildExtension(BuildExtension):
+class CustomBuildExtension(BuildExtension if _CUDA_AVAILABLE else setuptools.command.build_ext.build_ext):
     def build_extensions(self):
         for ext in self.extensions:
             if not "cxx" in ext.extra_compile_args:
@@ -70,129 +87,146 @@ if __name__ == "__main__":
 
     torch_version = torch.__version__.split("+")[0]
     torch_major_minor_version = ".".join(torch_version.split(".")[:2])
-    cuda_version = torch.version.cuda  # e.g., "12.4"
     if "dev" in version:
         version = version + date.today().strftime("%Y%m%d")
-    # Version format: 1.2.0+cu12.4torch2.4
-    version = f"{version}+cu{cuda_version}torch{torch_major_minor_version}"
+
+    cuda_version = torch.version.cuda  # e.g., "12.4" or None
+    if cuda_version is not None and _CUDA_AVAILABLE:
+        # Version format: 1.2.0+cu12.4torch2.4
+        version = f"{version}+cu{cuda_version}torch{torch_major_minor_version}"
+    else:
+        # Non-CUDA build (e.g. Intel XPU)
+        version = f"{version}+torch{torch_major_minor_version}"
 
     ROOT_DIR = os.path.dirname(__file__)
 
-    INCLUDE_DIRS = [
-        "src",
-        "third_party/cutlass/include",
-        "third_party/json/include",
-        "third_party/mio/include",
-        "third_party/spdlog/include",
-        "third_party/Block-Sparse-Attention/csrc/block_sparse_attn",
-    ]
+    ext_modules = []
+    cmdclass = {}
 
-    INCLUDE_DIRS = [os.path.join(ROOT_DIR, dir) for dir in INCLUDE_DIRS]
+    if _CUDA_AVAILABLE:
+        INCLUDE_DIRS = [
+            "src",
+            "third_party/cutlass/include",
+            "third_party/json/include",
+            "third_party/mio/include",
+            "third_party/spdlog/include",
+            "third_party/Block-Sparse-Attention/csrc/block_sparse_attn",
+        ]
 
-    DEBUG = False
+        INCLUDE_DIRS = [os.path.join(ROOT_DIR, dir) for dir in INCLUDE_DIRS]
 
-    def ncond(s) -> list:
-        if DEBUG:
-            return []
-        else:
-            return [s]
+        DEBUG = False
 
-    def cond(s) -> list:
-        if DEBUG:
-            return [s]
-        else:
-            return []
+        def ncond(s) -> list:
+            if DEBUG:
+                return []
+            else:
+                return [s]
 
-    sm_targets = get_sm_targets()
-    print(f"Detected SM targets: {sm_targets}", file=sys.stderr)
+        def cond(s) -> list:
+            if DEBUG:
+                return [s]
+            else:
+                return []
 
-    assert len(sm_targets) > 0, "No SM targets found"
+        sm_targets = get_sm_targets()
+        print(f"Detected SM targets: {sm_targets}", file=sys.stderr)
 
-    GCC_FLAGS = ["-DENABLE_BF16=1", "-DBUILD_NUNCHAKU=1", "-fvisibility=hidden", "-g", "-std=c++20", "-UNDEBUG", "-Og"]
-    MSVC_FLAGS = ["/DENABLE_BF16=1", "/DBUILD_NUNCHAKU=1", "/std:c++20", "/UNDEBUG", "/Zc:__cplusplus", "/FS"]
-    NVCC_FLAGS = [
-        "-DENABLE_BF16=1",
-        "-DBUILD_NUNCHAKU=1",
-        "-g",
-        "-std=c++20",
-        "-UNDEBUG",
-        "-Xcudafe",
-        "--diag_suppress=20208",  # spdlog: 'long double' is treated as 'double' in device code
-        *cond("-G"),
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_HALF2_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-        f"--threads={len(sm_targets)}",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--ptxas-options=--allow-expensive-optimizations=true",
-    ]
+        assert len(sm_targets) > 0, "No SM targets found"
 
-    if os.getenv("NUNCHAKU_BUILD_WHEELS", "0") == "0":
-        NVCC_FLAGS.append("--generate-line-info")
+        GCC_FLAGS = ["-DENABLE_BF16=1", "-DBUILD_NUNCHAKU=1", "-fvisibility=hidden", "-g", "-std=c++20", "-UNDEBUG", "-Og"]
+        MSVC_FLAGS = ["/DENABLE_BF16=1", "/DBUILD_NUNCHAKU=1", "/std:c++20", "/UNDEBUG", "/Zc:__cplusplus", "/FS"]
+        NVCC_FLAGS = [
+            "-DENABLE_BF16=1",
+            "-DBUILD_NUNCHAKU=1",
+            "-g",
+            "-std=c++20",
+            "-UNDEBUG",
+            "-Xcudafe",
+            "--diag_suppress=20208",  # spdlog: 'long double' is treated as 'double' in device code
+            *cond("-G"),
+            "-U__CUDA_NO_HALF_OPERATORS__",
+            "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_HALF2_OPERATORS__",
+            "-U__CUDA_NO_HALF2_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            f"--threads={len(sm_targets)}",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "--ptxas-options=--allow-expensive-optimizations=true",
+        ]
 
-    for target in sm_targets:
-        NVCC_FLAGS += ["-gencode", f"arch=compute_{target},code=sm_{target}"]
+        if os.getenv("NUNCHAKU_BUILD_WHEELS", "0") == "0":
+            NVCC_FLAGS.append("--generate-line-info")
 
-    NVCC_MSVC_FLAGS = ["-Xcompiler", "/Zc:__cplusplus", "-Xcompiler", "/FS", "-Xcompiler", "/bigobj"]
+        for target in sm_targets:
+            NVCC_FLAGS += ["-gencode", f"arch=compute_{target},code=sm_{target}"]
 
-    nunchaku_extension = CUDAExtension(
-        name="nunchaku._C",
-        sources=[
-            "nunchaku/csrc/pybind.cpp",
-            "src/interop/torch.cpp",
-            "src/activation.cpp",
-            "src/layernorm.cpp",
-            "src/Linear.cpp",
-            *ncond("src/FluxModel.cpp"),
-            *ncond("src/SanaModel.cpp"),
-            "src/Serialization.cpp",
-            "src/Module.cpp",
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim64_fp16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim64_bf16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim128_fp16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim128_bf16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim64_fp16_sm80.cu"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim64_bf16_sm80.cu"),
-            *ncond(
-                "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim128_fp16_sm80.cu"
-            ),
-            *ncond(
-                "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim128_bf16_sm80.cu"
-            ),
-            "src/kernels/activation_kernels.cu",
-            "src/kernels/layernorm_kernels.cu",
-            "src/kernels/misc_kernels.cu",
-            "src/kernels/zgemm/gemm_w4a4.cu",
-            "src/kernels/zgemm/gemm_w4a4_test.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_fp16_int4.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_fp16_int4_fasteri2f.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_fp16_fp4.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_bf16_int4.cu",
-            "src/kernels/zgemm/gemm_w4a4_launch_bf16_fp4.cu",
-            "src/kernels/zgemm/gemm_w8a8.cu",
-            "src/kernels/zgemm/attention.cu",
-            "src/kernels/dwconv.cu",
-            "src/kernels/gemm_batched.cu",
-            "src/kernels/gemm_f16.cu",
-            "src/kernels/awq/gemm_awq.cu",
-            "src/kernels/awq/gemv_awq.cu",
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/flash_api.cpp"),
-            *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/flash_api_adapter.cpp"),
-        ],
-        extra_compile_args={"gcc": GCC_FLAGS, "msvc": MSVC_FLAGS, "nvcc": NVCC_FLAGS, "nvcc_msvc": NVCC_MSVC_FLAGS},
-        include_dirs=INCLUDE_DIRS,
-    )
+        NVCC_MSVC_FLAGS = ["-Xcompiler", "/Zc:__cplusplus", "-Xcompiler", "/FS", "-Xcompiler", "/bigobj"]
+
+        nunchaku_extension = CUDAExtension(
+            name="nunchaku._C",
+            sources=[
+                "nunchaku/csrc/pybind.cpp",
+                "src/interop/torch.cpp",
+                "src/activation.cpp",
+                "src/layernorm.cpp",
+                "src/Linear.cpp",
+                *ncond("src/FluxModel.cpp"),
+                *ncond("src/SanaModel.cpp"),
+                "src/Serialization.cpp",
+                "src/Module.cpp",
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim64_fp16_sm80.cu"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim64_bf16_sm80.cu"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim128_fp16_sm80.cu"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_hdim128_bf16_sm80.cu"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim64_fp16_sm80.cu"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim64_bf16_sm80.cu"),
+                *ncond(
+                    "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim128_fp16_sm80.cu"
+                ),
+                *ncond(
+                    "third_party/Block-Sparse-Attention/csrc/block_sparse_attn/src/flash_fwd_block_hdim128_bf16_sm80.cu"
+                ),
+                "src/kernels/activation_kernels.cu",
+                "src/kernels/layernorm_kernels.cu",
+                "src/kernels/misc_kernels.cu",
+                "src/kernels/zgemm/gemm_w4a4.cu",
+                "src/kernels/zgemm/gemm_w4a4_test.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_fp16_int4.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_fp16_int4_fasteri2f.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_fp16_fp4.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_bf16_int4.cu",
+                "src/kernels/zgemm/gemm_w4a4_launch_bf16_fp4.cu",
+                "src/kernels/zgemm/gemm_w8a8.cu",
+                "src/kernels/zgemm/attention.cu",
+                "src/kernels/dwconv.cu",
+                "src/kernels/gemm_batched.cu",
+                "src/kernels/gemm_f16.cu",
+                "src/kernels/awq/gemm_awq.cu",
+                "src/kernels/awq/gemv_awq.cu",
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/flash_api.cpp"),
+                *ncond("third_party/Block-Sparse-Attention/csrc/block_sparse_attn/flash_api_adapter.cpp"),
+            ],
+            extra_compile_args={"gcc": GCC_FLAGS, "msvc": MSVC_FLAGS, "nvcc": NVCC_FLAGS, "nvcc_msvc": NVCC_MSVC_FLAGS},
+            include_dirs=INCLUDE_DIRS,
+        )
+        ext_modules = [nunchaku_extension]
+        cmdclass = {"build_ext": CustomBuildExtension}
+    else:
+        print(
+            "CUDA is not available. Skipping native C++/CUDA extension build.\n"
+            "Nunchaku will use PyTorch fallback / Triton backends at runtime.",
+            file=sys.stderr,
+        )
 
     setuptools.setup(
         name="nunchaku",
         version=version,
         packages=setuptools.find_packages(),
-        ext_modules=[nunchaku_extension],
-        cmdclass={"build_ext": CustomBuildExtension},
+        ext_modules=ext_modules,
+        cmdclass=cmdclass,
     )

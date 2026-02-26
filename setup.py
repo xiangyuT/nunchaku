@@ -13,7 +13,7 @@ from packaging import version as packaging_version
 # the native C++/CUDA extension is skipped and nunchaku falls back to the
 # PyTorch / Triton backends at runtime.
 # ---------------------------------------------------------------------------
-_CUDA_AVAILABLE = torch.cuda.is_available() or os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+_CUDA_AVAILABLE = torch.cuda.is_available() or bool(os.environ.get("CUDA_HOME")) or bool(os.environ.get("CUDA_PATH"))
 try:
     from torch.utils.cpp_extension import CUDA_HOME
 

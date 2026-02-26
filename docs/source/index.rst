@@ -10,6 +10,7 @@ Check out `DeepCompressor <github_deepcompressor_>`_ for the quantization librar
 
    installation/installation.rst
    installation/setup_windows.rst
+   installation/setup_xpu.rst
 
 .. toctree::
     :maxdepth: 1
@@ -54,3 +55,4 @@ Check out `DeepCompressor <github_deepcompressor_>`_ for the quantization librar
     developer/contribution_guide.rst
     developer/docstring.rst
     developer/build_docs.rst
+    developer/xpu_support_checklist.rst

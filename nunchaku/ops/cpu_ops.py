@@ -162,7 +162,7 @@ def svdq_quantize_w4a4_act_fuse_lora_cpu(
     if fp4:
         raise NotImplementedError("CPU fallback does not support NVFP4 (fp4) quantization")
     if fuse_glu:
-        raise NotImplementedError("CPU fallback does not support fused GLU")
+        raise NotImplementedError("CPU fallback does not support fused GLU (Gated Linear Unit)")
 
     M, K = input.shape
     M_pad = output.shape[0]
@@ -251,7 +251,7 @@ def svdq_gemm_w4a4_cpu(
     SANA-specific outputs, NVFP4.
     """
     if fp4:
-        raise NotImplementedError("CPU fallback does not support NVFP4 (fp4)")
+        raise NotImplementedError("CPU fallback does not support NVFP4 (fp4) quantization")
 
     group_size = 64  # INT4
 

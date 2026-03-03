@@ -14,8 +14,12 @@ from safetensors.torch import load_file
 from torch import nn
 from torch.nn import functional as F
 
-from ..._C import QuantizedSanaModel
-from ..._C import utils as cutils
+try:
+    from ..._C import QuantizedSanaModel
+    from ..._C import utils as cutils
+except ImportError:
+    QuantizedSanaModel = None
+    cutils = None
 from ...utils import get_precision
 from .utils import NunchakuModelLoaderMixin
 

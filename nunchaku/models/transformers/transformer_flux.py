@@ -18,8 +18,12 @@ from packaging.version import Version
 from safetensors.torch import load_file
 from torch import nn
 
-from ..._C import QuantizedFluxModel
-from ..._C import utils as cutils
+try:
+    from ..._C import QuantizedFluxModel
+    from ..._C import utils as cutils
+except ImportError:
+    QuantizedFluxModel = None
+    cutils = None
 from ...lora.flux.nunchaku_converter import fuse_vectors, to_nunchaku
 from ...lora.flux.utils import is_nunchaku_format
 from ...utils import check_hardware_compatibility, get_precision, load_state_dict_in_safetensors, pad_tensor

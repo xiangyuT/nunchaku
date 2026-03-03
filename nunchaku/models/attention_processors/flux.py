@@ -8,7 +8,10 @@ from typing import Optional, Tuple
 import torch
 from torch.nn import functional as F
 
-from ..._C.ops import attention_fp16
+try:
+    from ..._C.ops import attention_fp16
+except ImportError:
+    attention_fp16 = None
 from ...ops.fused import fused_qkv_norm_rottary
 
 

@@ -4,8 +4,13 @@ This module provides Python wrappers for Nunchaku's high-performance SVDQuant qu
 
 import torch
 
-from .._C import ops
+try:
+    from .._C import ops as _C_ops
+except ImportError:
+    _C_ops = None
+
 from ..utils import ceil_divide
+from .cpu_ops import svdq_quantize_w4a4_act_fuse_lora_cpu
 
 
 def svdq_quantize_w4a4_act_fuse_lora_cuda(
@@ -77,5 +82,8 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
     if lora_act_out is None:
         lora_act_out = torch.empty(batch_size_pad, rank, dtype=torch.float32, device=input.device)
 
-    ops.quantize_w4a4_act_fuse_lora(input, output, oscales, lora_down, lora_act_out, smooth, fuse_glu, fp4)
+    if input.device.type == "cpu" or _C_ops is None:
+        svdq_quantize_w4a4_act_fuse_lora_cpu(input, output, oscales, lora_down, lora_act_out, smooth, fuse_glu, fp4)
+    else:
+        _C_ops.quantize_w4a4_act_fuse_lora(input, output, oscales, lora_down, lora_act_out, smooth, fuse_glu, fp4)
     return output, oscales, lora_act_out

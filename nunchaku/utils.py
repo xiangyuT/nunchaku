@@ -217,9 +217,13 @@ def get_precision(
     if precision == "auto":
         if isinstance(device, str):
             device = torch.device(device)
-        capability = torch.cuda.get_device_capability(0 if device.index is None else device.index)
-        sm = f"{capability[0]}{capability[1]}"
-        precision = "fp4" if sm in ["120", "121"] else "int4"
+        if device.type == "cuda":
+            capability = torch.cuda.get_device_capability(0 if device.index is None else device.index)
+            sm = f"{capability[0]}{capability[1]}"
+            precision = "fp4" if sm in ["120", "121"] else "int4"
+        else:
+            # Non-CUDA devices default to int4
+            precision = "int4"
     if pretrained_model_name_or_path is not None:
         if precision == "int4":
             if "fp4" in str(pretrained_model_name_or_path):
@@ -243,9 +247,12 @@ def is_turing(device: str | torch.device = "cuda") -> bool:
     -------
     bool
         True if the current GPU is a Turing GPU, False otherwise.
+        Always returns False for non-CUDA devices.
     """
     if isinstance(device, str):
         device = torch.device(device)
+    if device.type != "cuda":
+        return False
     device_id = 0 if device.index is None else device.index
     capability = torch.cuda.get_device_capability(device_id)
     sm = f"{capability[0]}{capability[1]}"
@@ -254,7 +261,7 @@ def is_turing(device: str | torch.device = "cuda") -> bool:
 
 def get_gpu_memory(device: str | torch.device = "cuda", unit: str = "GiB") -> int:
     """
-    Get the total memory of the current GPU.
+    Get the total memory of the current GPU or accelerator.
 
     Parameters
     ----------
@@ -266,7 +273,7 @@ def get_gpu_memory(device: str | torch.device = "cuda", unit: str = "GiB") -> in
     Returns
     -------
     int
-        GPU memory in the specified unit.
+        Device memory in the specified unit.
 
     Raises
     ------
@@ -276,7 +283,12 @@ def get_gpu_memory(device: str | torch.device = "cuda", unit: str = "GiB") -> in
     if isinstance(device, str):
         device = torch.device(device)
     assert unit in ("GiB", "MiB", "B")
-    memory = torch.cuda.get_device_properties(device).total_memory
+    if device.type == "cuda":
+        memory = torch.cuda.get_device_properties(device).total_memory
+    elif device.type == "xpu" and hasattr(torch, "xpu"):
+        memory = torch.xpu.get_device_properties(device).total_memory
+    else:
+        raise ValueError(f"get_gpu_memory not supported for device type '{device.type}'")
     if unit == "GiB":
         return memory // (1024**3)
     elif unit == "MiB":
@@ -287,7 +299,7 @@ def get_gpu_memory(device: str | torch.device = "cuda", unit: str = "GiB") -> in
 
 def check_hardware_compatibility(quantization_config: dict, device: str | torch.device = "cuda"):
     """
-    Check if the quantization config is compatible with the current GPU.
+    Check if the quantization config is compatible with the current device.
 
     Parameters
     ----------
@@ -299,10 +311,20 @@ def check_hardware_compatibility(quantization_config: dict, device: str | torch.
     Raises
     ------
     ValueError
-        If the quantization config is not compatible with the GPU architecture.
+        If the quantization config is not compatible with the device architecture.
     """
     if isinstance(device, str):
         device = torch.device(device)
+
+    if device.type == "xpu":
+        # Intel XPU: only INT4 is currently supported via fallback
+        if quantization_config["weight"]["dtype"] != "int4":
+            raise ValueError('Intel XPU currently only supports "int4" quantization via PyTorch fallback.')
+        return
+
+    if device.type != "cuda":
+        raise ValueError(f"Unsupported device type '{device.type}' for quantized inference.")
+
     capability = torch.cuda.get_device_capability(0 if device.index is None else device.index)
     sm = f"{capability[0]}{capability[1]}"
     if sm in ["120", "121"]:  # you can only use the fp4 models
